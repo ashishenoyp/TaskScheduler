@@ -4,11 +4,10 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.PriorityQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 @Component
 public class SchedulerImpl implements Scheduler {
@@ -17,18 +16,21 @@ public class SchedulerImpl implements Scheduler {
     private ExecutorService executorService;
     private ScheduledExecutorService eventLoop;
     private PriorityQueue<Task> taskQueue;
+    private List<Future<?>> futures;
 
     private class EventLoop implements Runnable {
         @Override
         public void run() {
-            if (taskQueue.isEmpty()) {
-                return;
-            }
-            logger.debug("Inside Eventloop run()");
-            Task task = taskQueue.peek();
-            while (task != null && task.getScheduleTime() <= (System.currentTimeMillis()/1000)) {
-                executorService.submit(taskQueue.poll());
-                task = taskQueue.peek();
+            synchronized (taskQueue) {
+                if (taskQueue.isEmpty()) {
+                    return;
+                }
+                logger.debug("Inside Eventloop run()");
+                Task task = taskQueue.peek();
+                while (task != null && task.getScheduleTime() <= (System.currentTimeMillis() / 1000)) {
+                    futures.add(executorService.submit(taskQueue.poll()));
+                    task = taskQueue.peek();
+                }
             }
             logger.debug("Leaving event loop");
         }
@@ -39,12 +41,16 @@ public class SchedulerImpl implements Scheduler {
         eventLoop = Executors.newScheduledThreadPool(1);
         executorService = Executors.newFixedThreadPool(2);
         taskQueue = new PriorityQueue<>();
+        futures = new ArrayList<>();
         eventLoop.scheduleAtFixedRate(new EventLoop(), 0, 1, TimeUnit.SECONDS);
         logger.info("Scheduler started");
     }
 
     @Override
     public void stop() {
+        futures.forEach(f -> f.cancel(true));
+        futures.clear();
+
         eventLoop.shutdownNow();
         executorService.shutdownNow();
         try {
@@ -60,7 +66,9 @@ public class SchedulerImpl implements Scheduler {
     }
 
     @Override
-    public synchronized void addTask(Task task) {
-        taskQueue.add(task);
+    public void addTask(Task task) {
+        synchronized (taskQueue) {
+            taskQueue.add(task);
+        }
     }
 }
