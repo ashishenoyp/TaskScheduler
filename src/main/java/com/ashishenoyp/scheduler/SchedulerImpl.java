@@ -14,22 +14,48 @@ public class SchedulerImpl implements Scheduler {
     private static final Log logger = LogFactory.getLog(SchedulerImpl.class);
 
     private ExecutorService executorService;
-    private ScheduledExecutorService eventLoop;
+    private ExecutorService eventLoop;
+    private Future<?> eventLoopFuture;
     private PriorityQueue<Task> taskQueue;
     private List<Future<?>> futures;
 
     private class EventLoop implements Runnable {
+        private long defaultSleepMs = 10000000;
+
         @Override
         public void run() {
-            synchronized (taskQueue) {
+            while (true) {
+                logger.info("Inside Eventloop run()");
                 if (taskQueue.isEmpty()) {
-                    return;
+                    try {
+                        logger.info("Sleeping for(ms): " + defaultSleepMs);
+                        Thread.currentThread().sleep(defaultSleepMs);
+                    } catch (InterruptedException ex) {
+                        // If task queue is empty at this point, and we were interrupted
+                        // during sleep, then its a signal to shutdown:
+                        if (taskQueue.isEmpty()) {
+                            break;
+                        }
+                    }
                 }
-                logger.debug("Inside Eventloop run()");
-                Task task = taskQueue.peek();
-                while (task != null && task.getScheduleTime() <= (System.currentTimeMillis() / 1000)) {
+
+                synchronized (taskQueue) {
+                    // sleep up until the next to be executed task:
+                    Task task = taskQueue.peek();
+                    try {
+                        long currTimeSec = System.currentTimeMillis()/1000;
+                        long sleepFor = (task.getScheduleTime() - currTimeSec);
+                        if (sleepFor > 0) {
+                            logger.info("Sleeping for(seconds): " + (task.getScheduleTime() - currTimeSec));
+                            Thread.currentThread().sleep(sleepFor*1000);
+                        }
+                    } catch (InterruptedException ex) {
+                        // A newly added task has to be executed sooner; determine the new
+                        // to be slept until time:
+                        continue;
+                    }
+
                     futures.add(executorService.submit(taskQueue.poll()));
-                    task = taskQueue.peek();
                 }
             }
             logger.debug("Leaving event loop");
@@ -38,11 +64,11 @@ public class SchedulerImpl implements Scheduler {
 
     @Override
     public void start() {
-        eventLoop = Executors.newScheduledThreadPool(1);
+        eventLoop = Executors.newFixedThreadPool(1);
         executorService = Executors.newFixedThreadPool(2);
         taskQueue = new PriorityQueue<>();
         futures = new ArrayList<>();
-        eventLoop.scheduleAtFixedRate(new EventLoop(), 0, 1, TimeUnit.SECONDS);
+        eventLoopFuture = eventLoop.submit(new EventLoop());
         logger.info("Scheduler started");
     }
 
@@ -68,7 +94,17 @@ public class SchedulerImpl implements Scheduler {
     @Override
     public void addTask(Task task) {
         synchronized (taskQueue) {
-            taskQueue.add(task);
+            logger.info("Adding task: " + task.getTaskID());
+
+            if (taskQueue.isEmpty() ||
+                    (task.getScheduleTime() < taskQueue.peek().getScheduleTime())) {
+                logger.info("Interrupting eventLoop !");
+                taskQueue.add(task);
+                // Interrupt the sleeping thread:
+                eventLoopFuture.cancel(true);
+            } else {
+                taskQueue.add(task);
+            }
         }
     }
 }
